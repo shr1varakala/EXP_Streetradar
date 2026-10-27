@@ -1,0 +1,331 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+<title>Steerradar - Nearby Bus Stops</title>
+
+<link rel="stylesheet"
+ href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+* {
+    box-sizing: border-box;
+}
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #0d1724;
+    color: white;
+}
+header {
+    background: #10283a;
+    padding: 18px;
+    text-align: center;
+}
+h2 {
+    margin: 0 0 6px;
+    color: #23e0c0;
+}
+header p {
+    margin: 0;
+    font-size: 13px;
+    color: #b8cad4;
+}
+#map {
+    height: 50vh;
+    width: 100%;
+}
+.controls {
+    display: flex;
+    gap: 10px;
+    padding: 12px;
+}
+button {
+    border: none;
+    border-radius: 10px;
+    padding: 12px;
+    background: #19cba5;
+    color: #071923;
+    font-weight: bold;
+    cursor: pointer;
+    flex: 1;
+}
+button:disabled {
+    opacity: .5;
+}
+#status {
+    padding: 10px 16px;
+    font-size: 14px;
+    color: #bbd2dc;
+}
+#results {
+    padding: 10px 14px 30px;
+}
+.stop {
+    background: #182e40;
+    margin-bottom: 12px;
+    padding: 15px;
+    border-radius: 12px;
+}
+.stop h3 {
+    margin: 0 0 8px;
+    color: #37dfc2;
+}
+.stop p {
+    margin: 4px 0 10px;
+    font-size: 13px;
+}
+.stop button {
+    width: 100%;
+}
+.recommendation {
+    border: 2px solid #19cba5;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h2>Steerradar</h2>
+    <p>Nearby Bus Stops and Smart Recommendations</p>
+</header>
+
+<div id="map"></div>
+
+<div class="controls">
+    <button id="findBtn">Find Bus Stops</button>
+    <button id="refreshBtn">Refresh</button>
+</div>
+
+<div id="status" role="status">
+    Enable location to find nearby bus stops.
+</div>
+
+<div id="results"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+const map = L.map("map").setView(
+    [17.385, 78.4867], 12
+);
+
+L.tileLayer(
+    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    {
+        attribution: "&copy; OpenStreetMap contributors",
+        maxZoom: 19
+    }
+).addTo(map);
+
+let markers = L.layerGroup().addTo(map);
+let userMarker = null;
+
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+const findBtn = document.getElementById("findBtn");
+const refreshBtn = document.getElementById("refreshBtn");
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad;
+    const dLon = (lon2 - lon1) * rad;
+
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1 * rad) *
+        Math.cos(lat2 * rad) *
+        Math.sin(dLon / 2) ** 2;
+
+    return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function navigateTo(lat, lon) {
+    const url =
+        "https://www.google.com/maps/dir/?api=1" +
+        "&destination=" + lat + "," + lon +
+        "&travelmode=walking";
+
+    window.location.href = url;
+}
+
+async function loadBusStops(lat, lon) {
+    statusEl.textContent = "Searching nearby bus stops...";
+    markers.clearLayers();
+    resultsEl.replaceChildren();
+
+    const query = `
+[out:json][timeout:25];
+(
+  node["highway"="bus_stop"](around:2000,${lat},${lon});
+  node["public_transport"="platform"]
+      ["bus"="yes"](around:2000,${lat},${lon});
+);
+out body;
+`;
+
+    const endpoint =
+        "https://overpass.kumi.systems/api/interpreter";
+
+    const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+            "Content-Type":
+                "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({ data: query })
+    });
+
+    if (!response.ok) {
+        throw new Error("Bus stop service unavailable");
+    }
+
+    const data = await response.json();
+    const unique = new Map();
+
+    for (const item of data.elements || []) {
+        if (!Number.isFinite(item.lat) ||
+            !Number.isFinite(item.lon)) continue;
+
+        const tags = item.tags || {};
+        const distance = distanceKm(
+            lat, lon, item.lat, item.lon
+        );
+
+        unique.set(item.type + ":" + item.id, {
+            name: tags.name ||
+                  tags["name:en"] ||
+                  "Unnamed Bus Stop",
+            lat: item.lat,
+            lon: item.lon,
+            distance: distance,
+            ref: tags.ref || ""
+        });
+    }
+
+    const stops = [...unique.values()]
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 30);
+
+    if (!stops.length) {
+        statusEl.textContent =
+            "No mapped bus stops found within 2 km.";
+        return;
+    }
+
+    statusEl.textContent =
+        stops.length + " nearby bus stops found.";
+
+    stops.forEach((stop, index) => {
+        const marker = L.marker([
+            stop.lat, stop.lon
+        ]).addTo(markers);
+
+        marker.bindPopup(
+            document.createTextNode(stop.name)
+        );
+
+        const card = document.createElement("div");
+        card.className = "stop";
+
+        if (index === 0) {
+            card.classList.add("recommendation");
+        }
+
+        const heading = document.createElement("h3");
+        heading.textContent =
+            (index === 0 ? "Nearest: " : "") +
+            stop.name;
+
+        const distance = document.createElement("p");
+        distance.textContent =
+            "Distance: " +
+            (stop.distance * 1000).toFixed(0) +
+            " metres (straight line)";
+
+        const info = document.createElement("p");
+        info.textContent = stop.ref
+            ? "Stop reference: " + stop.ref
+            : "Stop reference unavailable";
+
+        const button = document.createElement("button");
+        button.textContent = "Get Directions";
+
+        button.addEventListener("click", () => {
+            navigateTo(stop.lat, stop.lon);
+        });
+
+        card.append(heading, distance, info, button);
+        resultsEl.appendChild(card);
+    });
+
+    map.setView([lat, lon], 15);
+}
+
+function findNearbyStops() {
+    if (!navigator.geolocation) {
+        statusEl.textContent =
+            "Location is not supported on this device.";
+        return;
+    }
+
+    findBtn.disabled = true;
+    statusEl.textContent = "Getting your location...";
+
+    navigator.geolocation.getCurrentPosition(
+        async position => {
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
+
+            if (userMarker) {
+                map.removeLayer(userMarker);
+            }
+
+            userMarker = L.circleMarker(
+                [lat, lon],
+                {
+                    radius: 9,
+                    color: "#ffffff",
+                    fillColor: "#19cba5",
+                    fillOpacity: 1
+                }
+            ).addTo(map);
+
+            userMarker.bindPopup("Your Location");
+
+            try {
+                await loadBusStops(lat, lon);
+            } catch (error) {
+                statusEl.textContent =
+                    "Unable to load bus stops. " +
+                    "Check the network and try again.";
+                console.error(error);
+            } finally {
+                findBtn.disabled = false;
+            }
+        },
+        error => {
+            statusEl.textContent =
+                "Unable to get location. " +
+                "Check your Android location permissions.";
+            findBtn.disabled = false;
+        },
+        {
+            enableHighAccuracy: true,
+            timeout: 15000,
+            maximumAge: 30000
+        }
+    );
+}
+
+findBtn.addEventListener("click", findNearbyStops);
+refreshBtn.addEventListener("click", findNearbyStops);
+</script>
+
+</body>
+</html>
